@@ -1,0 +1,26 @@
+#+TITLE: day one
+#+AUTHOR: xfwduke
+
+* 目标 [1/1]
+- [X] 实现选举相关的节点数据结构
+
+* 节点结构
+
+节点属性被分成 ~3~ 类
+1. 所有节点上持久存在的
+  - ~currentTerm~ : 最后任期号
+  - ~votedFor~ : 当前任期内收到的选票的候选人 ~ID~
+  - ~log[]~ : 日志
+2. 所有节点上不稳定存在的
+3. ~leader~ 节点上不稳定存在的
+
+与选举有关的是第 /1/ 类属性中的 ~currentTerm~ 和 ~votedFor~
+
+所以节点结构可以定义为
+#+BEGIN_SRC go
+type Server struct {
+	currentTerm uint64
+	votedFor uint64
+}
+#+END_SRC
+
