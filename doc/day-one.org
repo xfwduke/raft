@@ -5,7 +5,7 @@
 
 ** 基本概念
 
-*** 节点状态
+*** /state/
 
 节点有 /3/ 种状态
 1. ~Follower~
@@ -52,6 +52,28 @@ In some situations an election will result in a split vote. In this case the ter
 #+CAPTION: Raft divides time into terms
 #+ATTR_HTML: :width 30% :height 30%
 [[file:img/Screenshot%20from%202018-09-15%2022-29-57.png]]
+
+图的说明里面由一句话比较关键
+#+BEGIN_QUOTE
+After a successful election, a single leader manages the cluster until then end of the term.
+#+END_QUOTE
+
+上面所有的文件加上图，充分解释了 ~term~ 这个关键概念。但就是这些文字和图，最开始看的时候引起来很大的误解，至少我是误解的一塌糊涂。
+
+**** 任期切换
+原文提到， /term/ 是 /raft/ 管理时间的单位，而其长度还是 _*任意*_ 的。这就很误导人了，最初还以为是类似操作系统 /CPU/ 时间片的概念，只是时长是随机的，实际根本不是这样。
+
+这就需要搞清楚一件事情，既然 /raft/ 以 /term/ 作为单位来管理时间，那到底如何划分不同的 /term/。
+
+实际上，只有发生 /election timeout/ 的时候，才会结束当前 /term/ ， 并开始一个新的 /term/ 。同时，由于发生了 /election timeout/ ，必然会发起一个选举流程( ~election~ )，所以才会如原文所说： /Each term begins with a election/ 。
+
+**** 任期长度
+原文还提到，/term/ 的长度是任意时长。在搞清楚任期切换后，这个 _*任意*_ 就没那么难以理解了。
+
+1. 在完成一次成功的选举后，集群进入正常的日志复制状态，一直到必须进行一次新的选举
+2. 如果选举失败，则过了一小段时间( /election timeout again/ )，又会发起一次新的选举
+
+/term/ 的时长是第一次选举开始到第二次选举开始间的时长，所以说时长是任意的。
 
 
 ** 节点实现
