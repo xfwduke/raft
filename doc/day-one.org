@@ -1,26 +1,96 @@
 #+TITLE: day one
 #+AUTHOR: xfwduke
 
-* 目标 [1/1]
-- [X] 实现选举相关的节点数据结构
+* 选举
 
-* 节点结构
+** 基本概念
 
-节点属性被分成 ~3~ 类
-1. 所有节点上持久存在的
-  - ~currentTerm~ : 最后任期号
-  - ~votedFor~ : 当前任期内收到的选票的候选人 ~ID~
-  - ~log[]~ : 日志
-2. 所有节点上不稳定存在的
-3. ~leader~ 节点上不稳定存在的
+*** 节点状态
 
-与选举有关的是第 /1/ 类属性中的 ~currentTerm~ 和 ~votedFor~
+节点有 /3/ 种状态
+1. ~Follower~
+2. ~Candidate~
+3. ~Leader~
 
-所以节点结构可以定义为
+节点刚启动时，总会处于 /Follower/ 状态。
+
+*** /RPC/
+
+理论上来说， /raft/ 只需要 /2/ 种 /RPC/
+
+1. ~RequestVote RPC~ ：在选举阶段由 /Candidate/ 发起
+2. ~AppendEntries RPC~ ：由 /Leader/ 发起，有 /2/ 个应用场景
+  1. 复制日志条目
+  2. 心跳维持，此时 /RPC Request/ 不包含日志条目信息
+
+*** /timeout/
+
+/raft/ 有 /2/ 个 /timeout/
+
+1. ~heartbeat timeout~
+2. ~election timeout~
+
+两个 /timeout/ 的典型时长都是 /150~300ms/ 的随机值。
+
+**** /heartbeat timeout/
+由 /Leader/ 维持，周期性的向 /Follower/ 发送不带日志条目的 /AppendEntries Request/ 来重置 /Follower/ 的 /election timeout/，用于维持自身的领导地位。
+
+**** /election timeout/
+由 /Follower/ 维持，如果在超时时间内没有收到任何 /RPC Request/ ，会转变为 /Candidate/ 并发起选举。
+
+*** ~term~
+这个术语在中文的翻译中被翻译成 ~任期~ ，在论文中是这样描述的
+#+BEGIN_QUOTE
+Raft divides time into /terms/ of arbitray length, as shown in Figure 5.
+
+Each term begins with an election, in which one or more candidates attempt to become leader...
+
+If a candidate wins the election, then it serves as leader for the rest of the term.
+In some situations an election will result in a split vote. In this case the term will end with no leader; a new term whill begin shortly.
+#+END_QUOTE
+
+[[file:img/Screenshot%20from%202018-09-15%2022-29-57.png][Figure 5]]
+
+
+** 节点实现
+
+*** 节点结构
+
+节点的众多属性中和选举相关的倒是不多，只有 /2/ 个
+1. ~currentTerm~ ： 当前任期号，初始值为 /0/ 并单调增加
+2. ~votedFor~ ：当前任期收到的选票所代表的 /Candidate/ 的 /CandidateId/
+
+所以节点可以定义为
 #+BEGIN_SRC go
-type Server struct {
+type Node struct {
 	currentTerm uint64
 	votedFor uint64
 }
 #+END_SRC
+
+*** 节点状态
+
+论文中并没有说节点结构必须包含自身状态，但实现的时候总是需要的，所以节点结构需要更新为
+#+BEGIN_SRC go
+type NodeState int
+
+const (
+	Follower NodeState = iota
+	Candidate
+	Leader
+)
+
+func (r NodeState) String() string {
+	return [...]string{"Follower", "Candidate", "Leader"}[r]
+}
+
+type Node struct {
+	currentTerm uint64
+	votedFor    uint64
+	nodeState NodeState
+}
+#+END_SRC
+
+*** /election timeout/
+
 

@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package raftproto;
+
+service AppendEntryRPC {
+    rpc AppendEntry(AppendEntryRequest) returns (AppendEntryResponse);
+}
+
+message AppendEntryRequest {
+    uint64 term = 1;
+    uint64 leaderId = 2;
+}
+
+message AppendEntryResponse {
+    uint64 term = 1;
+    bool success = 2;
+}

@@ -1,12 +1,16 @@
 #+TITLE: raft day by day
 #+AUTHOR: xfwduke
 
-1. 基于 [[https://raft.github.io/raft.pdf][raft 的论文]] 做一个 /golang/ 版本的 /raft/ 的实现
-2. 节点间通信使用 ~gRPC~
+* 目标
 
-* 计划 [0/1]
-- [-] 实现节点选举 [1/2]
-  - [X] 实现选举相关的节点数据结构
-  - [ ] 实现选举相关的 /2/ 个 /RPC/ 通信
+1. 做一个 /golang/ 版本的 /raft/ 实现
+2. 先不看现成的方案，按自己的想法来做
+3. 到最后再看已有的项目是如何做的
+
+
+* 参考资料
+
+1. [[https:raft.github.io/raft.pdf][In Search of an Understandable Consensus Algorithm (Extended Version)]]
+2. [[http://thesecrtelivesofdata.com/raft/][Raft - Understandable Distributed Consensus (动画解释raft的工作原理)]]
 
 * [[file:day-one.org][day one]]
