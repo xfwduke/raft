@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package demoproto;
+
+service HeartBeat {
+    rpc KeepHeartBeat(HeartBeatRequest) returns (HeartBeatResponse);
+}
+
+message HeartBeatRequest {
+
+}
+
+message HeartBeatResponse {
+
+}

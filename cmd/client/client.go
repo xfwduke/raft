@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/xfwduke/raft/raftproto"
 	"google.golang.org/grpc"
+	"time"
 )
 
 func main() {
@@ -17,10 +18,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	client.AppendEntry(
-		ctx,
-		&raftproto.AppendEntryRequest{
-			Term:     1,
-			LeaderId: 1,
-		})
+	for {
+		client.AppendEntry(
+			ctx,
+			&raftproto.AppendEntryRequest{
+				Term:     1,
+				LeaderId: 1,
+			})
+		select {
+		case <-time.After(600 * time.Millisecond):
+			break
+		}
+	}
+
 }
