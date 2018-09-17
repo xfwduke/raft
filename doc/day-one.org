@@ -375,7 +375,7 @@ func (c *Node) transToLeader() {
 #+ATTR_HTML: :width 30% :height 30%
 [[file:img/Screenshot%20from%202018-09-17%2020-39-30.png]]
 
-虽然说状态转换相对简单，但要一下子完成的实现也不容易。所以依然做一定的简化作出一个 /demo/ 来
+虽然说状态转换相对简单，但要一下子完成的实现也不容易，所以依然做一定的简化作出一个 /demo/ 来。
 
 *** 目标
 1. 以 /embeddemo/ 为基础做一定改造
