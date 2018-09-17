@@ -90,7 +90,7 @@ func (c *Node) transToLeader() {
 2. 一个周期性向 /Server/ 发送心跳的 /Client/
 3. /Server/ 和 /Client/ 用空的 /Request/ 和 /Response/ 通信
 ***** /heartbeatdemoproto/
- #+BEGIN_SRC 
+ #+BEGIN_SRC
  syntax = "proto3";
 
  package heartbeatdemoproto;
@@ -100,11 +100,11 @@ func (c *Node) transToLeader() {
  }
 
  message HeartBeatRequest {
-    
+
  }
 
  message HeartBeatResponse {
-    
+
  }
  #+END_SRC
 ***** /heartbeatdemoserver/
@@ -360,13 +360,35 @@ func (c *Node) transToLeader() {
  #+BEGIN_SRC shell
  embeddemo follower --listen 127.0.0.1:22221 --peer-nodes 127.0.0.1:22220 --peer-nodes 127.0.0.1:22222
  embeddemo follower --listen 127.0.0.1:22222 --peer-nodes 127.0.0.1:22220 --peer-nodes 127.0.0.1:22221
- embeddemo leader --listen 127.0.0.1:22220 --peer-nodes 127.0.0.1:22221 --peer-nodes 127.0.0.1:22222 
+ embeddemo leader --listen 127.0.0.1:22220 --peer-nodes 127.0.0.1:22221 --peer-nodes 127.0.0.1:22222
  #+END_SRC
 
  还存在几个问题
  1. 启动参数写起来有点麻烦，这个好改
  2. 必须先启动所有 /follower/ 否则 /leader/ 启动会报错，这个先不管它，后续完善选举逻辑的时候再修复
  3. 运行期间任意一个 /follower/ 退出会导致 /leader/ 退出，也等到以后再说
+
+** /state/ 转换
+节点的状态转换在 /raft/ 很重要但是并不复杂(比 /tcp/ 状态图简单太多了)，可以用一张图来表示
+
+#+CAPTION: Server states
+#+ATTR_HTML: :width 30% :height 30%
+[[file:img/Screenshot%20from%202018-09-17%2020-39-30.png]]
+
+虽然说状态转换相对简单，但要一下子完成的实现也不容易。所以依然做一定的简化作出一个 /demo/ 来
+
+*** 目标
+1. 以 /embeddemo/ 为基础做一定改造
+2. 所有节点启动是都是 /Follower/
+3. 通过命令行参数指定其中一个节点让它自发的做如下的转换
+
+				  +-------------+  	   	 +-------------+		+-------------+
+   	   	   +----->|   Follower  |------->|  Candidate  |------->|    Leader   |------+
+           |      +-------------+        +-------------+        +-------------+		 |
+		   |															   			 |
+		   +-------------------------------------------------------------------------+
+
+
 
 ** ~term~
 这个术语在中文的翻译中被翻译成 ~任期~ ，在论文中是这样描述的
@@ -404,6 +426,3 @@ After a successful election, a single leader manages the cluster until then end 
 2. 如果选举失败，则过了一小段时间( /election timeout again/ )，又会发起一次新的选举
 
 /term/ 的时长是第一次选举开始到第二次选举开始间的时长，所以说时长是任意的。
-
-
-
