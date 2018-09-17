@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/xfwduke/raft/demoproto"
+	"github.com/xfwduke/raft/heartbeatdemoproto"
 	"google.golang.org/grpc"
 	"math/rand"
 	"time"

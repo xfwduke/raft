@@ -78,20 +78,22 @@ func (c *Node) transToLeader() {
 **** /election timeout/
  由 /Follower/ 维持，如果在超时时间内没有收到任何 /RPC Request/ ，会转变为 /Candidate/ 并发起选举。
 *** 实现
-这一部分实现起来好纠结
 
 从上面的描述看， /Leader/ 周期性的广播心跳， /Follower/ 接收心跳信号并来重置自己的 /election timeout/ 。
 
 如果用 /gRPC/ 来实现节点间通信，总是 /Client/ 首先发起通信。所以感觉上应该 /Leader/ 作为 /Client/ 向作为 /Server/ 的各 /Follower/ 发送心跳，但问题是， /Server/ 端没有现成的办法来做无通信超时。
 
+**** /heartbeatdemo/
 所以先把问题简化下，实现一个 /Server/ 端的超时的 /demo/ 。
-
-**** /demo/
-***** /demoproto/
+***** 目标
+1. 一个带有超时的 /Server/
+2. 一个周期性向 /Server/ 发送心跳的 /Client/
+3. /Server/ 和 /Client/ 用空的 /Request/ 和 /Response/ 通信
+***** /heartbeatdemoproto/
  #+BEGIN_SRC 
  syntax = "proto3";
 
- package demoproto;
+ package heartbeatdemoproto;
 
  service HeartBeat {
      rpc KeepHeartBeat(HeartBeatRequest) returns (HeartBeatResponse);
@@ -105,8 +107,7 @@ func (c *Node) transToLeader() {
     
  }
  #+END_SRC
-
-***** /demoserver/
+***** /heartbeatdemoserver/
  一个典型的 /gRPC server/ 看起来是这个样子
  #+BEGIN_SRC go
  type DemoServer struct {
@@ -174,7 +175,7 @@ func (c *Node) transToLeader() {
 	 demoServer.StartTimeoutLoop()
  }
  #+END_SRC
-***** /democlient/
+***** /heartbeatdemoclient/
  /client/ 的实现比较简单，为了模拟 /raft/ 中的随机超时时间，特意让 /client/ 在 /1.5~2.5s/ 的随机时间发心跳
  #+BEGIN_SRC go
  func main() {
@@ -205,6 +206,168 @@ func (c *Node) transToLeader() {
 	 }
  }
  #+END_SRC
+
+**** /embeddemo/
+/heartbeatdemo/ 的 /Server/ 和 /Client/ 实现是分离的，而 /raft/ 的节点会根据 /state/ 的不同在 /Server/ 和 /Client/ 间切换，所以需要把代码整合。
+***** 目标
+1. 先不实现 /state/ 的在线切换，用命令行参数代替下
+2. 继续使用 /heartbeatdemo/ 中定义的 /gRPC proto/
+3. 支持多个 /Follower/
+
+***** /heartbeatserver/
+ 这部分和之前没什么差别
+ #+BEGIN_SRC go
+ type HeartBeatServer struct {
+	 hbch chan struct{}
+ }
+
+ func (hb *HeartBeatServer) KeepHeartBeat(context.Context, *demoproto.HeartBeatRequest) (*demoproto.HeartBeatResponse, error) {
+	 log.Info("heartbeat request received")
+	 hb.hbch <- struct{}{}
+	 log.Info("timeout reset signal sent")
+	 return &demoproto.HeartBeatResponse{}, nil
+ }
+
+ func (hb *HeartBeatServer) StartTimeoutLoop() {
+	 for {
+		 select {
+		 case <-hb.hbch:
+			 log.Info("timeout reset")
+		 case <-time.After(2 * time.Second):
+			 log.Info("timeout triggered")
+		 }
+	 }
+ }
+ #+END_SRC
+***** /Node/
+ 新增了 /Node/ 结构，同时包含了 /heartbeatserver/ 和 /clients/
+ #+BEGIN_SRC go
+ type Node struct {
+	 Lis       net.Listener
+	 HBServer  *HeartBeatServer
+	 HBClients []demoproto.HeartBeatClient
+ }
+
+ func NewNode() (*Node, error) {
+	 lis, err := net.Listen("tcp", listenURL)
+
+	 return &Node{
+		 Lis: lis,
+		 HBServer: &HeartBeatServer{
+			 hbch: make(chan struct{}),
+		 },
+	 }, err
+ }
+ #+END_SRC
+ 新建的 /Node/ 都会把 /Server/ 需要的端口打开，但并不启动 /heartbeatserver/ 。
+
+***** /send heartbeat/
+ 把发送心跳的逻辑实现为 /Node/ 的方法
+ #+BEGIN_SRC go
+ func (nd *Node) StartSendHeartBeat() {
+	 var wg sync.WaitGroup
+	 for _, cli := range nd.HBClients {
+		 wg.Add(1)
+		 go func(cli demoproto.HeartBeatClient) {
+			 ctx, cancel := context.WithCancel(context.Background())
+			 defer cancel()
+			 for {
+				 rand.Seed(time.Now().UnixNano())
+				 hbInterval := 1500 + rand.Int31n(1000)
+				 log.Infof("heartbeat interval = %d", hbInterval)
+				 _, err := cli.KeepHeartBeat(ctx, &demoproto.HeartBeatRequest{})
+				 if err != nil {
+					 panic(err)
+				 }
+				 log.Infof("heartbeat sent to %v", cli)
+				 select {
+				 case <-time.After(time.Duration(hbInterval) * time.Millisecond):
+					 break
+				 }
+			 }
+			 wg.Done()
+		 }(cli)
+	 }
+	 wg.Wait()
+ }
+ #+END_SRC
+
+ 1. 总体的逻辑和之前的 /demoheartbeat/ 并没有什么变化
+ 2. 多个 /client/ 的心跳广播是并行的
+ 3. 先临时用 /sync.WaitGroup/ 防止函数返回，以后可能会改掉
+
+***** /cmd command/
+ 两个函数负责以不同的 /state/ 启动 /Node/
+ #+BEGIN_SRC go
+ func RunAsFollower(cmd *cobra.Command, args []string) {
+	 node, err := NewNode()
+	 if err != nil {
+		 panic(err)
+	 }
+
+	 grpcServer := grpc.NewServer()
+	 demoproto.RegisterHeartBeatServer(grpcServer, node.HBServer)
+	 go grpcServer.Serve(node.Lis)
+	 node.HBServer.StartTimeoutLoop()
+ }
+
+ func RunAsLeader(cmd *cobra.Command, args []string) {
+	 node, err := NewNode()
+	 if err != nil {
+		 panic(err)
+	 }
+
+	 for _, peerNodeURL := range peerNodeURLs {
+		 ctx, _ := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		 conn, err := grpc.DialContext(ctx, peerNodeURL, grpc.WithInsecure(), grpc.WithBlock())
+		 if err != nil {
+			 panic(err)
+		 }
+		 log.Infof("connect to follower %s success", peerNodeURL)
+		 node.HBClients = append(node.HBClients, demoproto.NewHeartBeatClient(conn))
+	 }
+
+	 node.StartSendHeartBeat()
+ }
+ #+END_SRC
+
+ 命令行参数的处理由 /cobra/ 负责
+ #+BEGIN_SRC go
+ var rootCmd = &cobra.Command{}
+ var listenURL string
+ var peerNodeURLs []string
+
+ func init() {
+	 log.SetFormatter(&log.TextFormatter{})
+	 log.SetOutput(os.Stdout)
+
+	 rootCmd.PersistentFlags().StringVar(&listenURL, "listen", "", "")
+	 rootCmd.PersistentFlags().StringArrayVar(&peerNodeURLs, "peer-nodes", nil, "")
+	 rootCmd.AddCommand(&cobra.Command{
+		 Use:   "follower",
+		 Short: "run as follower",
+		 Run:   RunAsFollower,
+	 })
+	 rootCmd.AddCommand(&cobra.Command{
+		 Use:   "leader",
+		 Short: "run as leader",
+		 Run:   RunAsLeader,
+	 })
+ }
+ #+END_SRC
+
+***** 运行
+ #+BEGIN_SRC shell
+ embeddemo follower --listen 127.0.0.1:22221 --peer-nodes 127.0.0.1:22220 --peer-nodes 127.0.0.1:22222
+ embeddemo follower --listen 127.0.0.1:22222 --peer-nodes 127.0.0.1:22220 --peer-nodes 127.0.0.1:22221
+ embeddemo leader --listen 127.0.0.1:22220 --peer-nodes 127.0.0.1:22221 --peer-nodes 127.0.0.1:22222 
+ #+END_SRC
+
+ 还存在几个问题
+ 1. 启动参数写起来有点麻烦，这个好改
+ 2. 必须先启动所有 /follower/ 否则 /leader/ 启动会报错，这个先不管它，后续完善选举逻辑的时候再修复
+ 3. 运行期间任意一个 /follower/ 退出会导致 /leader/ 退出，也等到以后再说
+
 ** ~term~
 这个术语在中文的翻译中被翻译成 ~任期~ ，在论文中是这样描述的
 #+BEGIN_QUOTE
@@ -241,5 +404,6 @@ After a successful election, a single leader manages the cluster until then end 
 2. 如果选举失败，则过了一小段时间( /election timeout again/ )，又会发起一次新的选举
 
 /term/ 的时长是第一次选举开始到第二次选举开始间的时长，所以说时长是任意的。
+
 
 
