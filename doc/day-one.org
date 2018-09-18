@@ -57,16 +57,6 @@ func (c *Node) transToLeader() {
 }
 #+END_SRC
 这几个函数仅仅是先做个占位，具体的功能逻辑后面逐步再加进来。
-** /RPC/
-*** 概念
-理论上来说， /raft/ 只需要 /2/ 种 /RPC/
-1. ~RequestVote RPC~ ：在选举阶段由 /Candidate/ 发起
-2. ~AppendEntries RPC~ ：由 /Leader/ 发起，有 /2/ 个应用场景
-  1. 复制日志条目
-  2. 心跳维持，此时 /RPC Request/ 不包含日志条目信息
-*** 实现
-现在还不知道怎么实现可用的 /RPC/ 通信，先放着不管。
-
 ** /timeout/
 *** 概念
 /raft/ 有 /2/ 个 /timeout/
@@ -544,6 +534,57 @@ func Run(cmd *cobra.Command, args []string) {
 }
 #+END_SRC
 
+
+** /RPC/
+*** 概念
+理论上来说， /raft/ 只需要 /2/ 种 /RPC/
+1. ~RequestVote RPC~ ：在选举阶段由 /Candidate/ 发起
+2. ~AppendEntries RPC~ ：由 /Leader/ 发起，有 /2/ 个应用场景
+  1. 复制日志条目
+  2. 心跳维持，此时 /RPC Request/ 不包含日志条目信息
+*** 实现
+**** /RPC proto/ 定义
+参考论文描述，先省略掉和选举无关的部分，定义如下
+#+BEGIN_SRC 
+syntax = "proto3";
+
+package rpcdemoproto;
+
+service HeartBeatService {
+    rpc KeepHearBeat (AppendEntriesRequest) returns (AppendEntriesResponse);
+}
+service AppendEntriesService {
+    rpc AppendEntries (AppendEntriesRequest) returns (AppendEntriesResponse);
+}
+service VoteService {
+    rpc Vote (VoteRequest) returns (VoteResponse);
+}
+
+message AppendEntriesRequest {
+    uint64 term = 1;
+    uint64 leaderId = 2;
+}
+message AppendEntriesResponse {
+    uint64 term = 1;
+    bool success = 2;
+}
+
+message VoteRequest {
+    uint64 term = 1;
+    uint64 candidateId = 2;
+}
+message VoteResponse {
+    uint64 term = 1;
+    bool voteGranted = 2;
+}
+#+END_SRC
+
+/AppendEntriesRequest::leaderId/ 和 /VoteRequest::candidateId/ 目前定义为 /uint64/ ，这两个属性是用来标识特定 /Node/ 的，所以具体应该是什么类型，怎么实现还要再想想。
+
+**** /multi service/
+从定义可以看到，每个节点同时运行的 /RPC Service/ >= 1 (如 /Leader/ 就要同时作为 /HeartBeatServer/ 和 /AppendEntiresServer/ )；同理节点也有需求同时是不同 /Server/ 的 /Client/ 。如果每一个 /Server/ 都要监听一个端口，就有点不太合适了，所以要想办法一个端口搞定所有的 /Server/。
+
+先实现一个满足要求的 /demo/ 看看。
 
 ** ~term~
 这个术语在中文的翻译中被翻译成 ~任期~ ，在论文中是这样描述的
