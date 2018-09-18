@@ -22,7 +22,7 @@ func (hb *HeartBeatServer) KeepHeartBeat(context.Context, *demoproto.HeartBeatRe
 func (hb *HeartBeatServer) StartTimeoutLoop() {
 	for {
 		rand.Seed(time.Now().UnixNano())
-		heartBeatInterval := 100 + rand.Int31n(200)
+		heartBeatInterval := 150 + rand.Int31n(200)
 		select {
 		case <-hb.hbch:
 			log.Info("timeout reset")

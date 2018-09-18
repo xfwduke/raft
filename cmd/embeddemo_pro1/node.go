@@ -4,6 +4,7 @@ import (
 	"context"
 	log "github.com/Sirupsen/logrus"
 	"github.com/xfwduke/raft/heartbeatdemoproto"
+	"google.golang.org/grpc"
 	"math/rand"
 	"net"
 	"sync"
@@ -23,10 +24,17 @@ func (ns NodeState) String() string {
 }
 
 type Node struct {
-	Lis       net.Listener
-	HBServer  *HeartBeatServer
-	HBClients []demoproto.HeartBeatClient
-	State     NodeState
+	Lis        net.Listener
+	grpcServer *grpc.Server
+	HBServer   *HeartBeatServer
+	HBClients  []demoproto.HeartBeatClient
+	State      NodeState
+}
+
+func (nd *Node) Startup() {
+	nd.grpcServer = grpc.NewServer()
+	demoproto.RegisterHeartBeatServer(nd.grpcServer, nd.HBServer)
+	nd.TransTo(Follower)
 }
 
 func (nd *Node) TransTo(state NodeState) {
@@ -36,7 +44,7 @@ func (nd *Node) TransTo(state NodeState) {
 		nd.onAsFollower()
 	case Candidate:
 		nd.State = Candidate
-		nd.onAsFollower()
+		nd.onAsCandidate()
 	case Leader:
 		nd.State = Leader
 		nd.onAsLeader()
@@ -45,7 +53,12 @@ func (nd *Node) TransTo(state NodeState) {
 
 func (nd *Node) onAsFollower() {
 	log.Info("state = Follower")
+	go nd.grpcServer.Serve(nd.Lis)
 	nd.HBServer.StartTimeoutLoop()
+	nd.grpcServer.GracefulStop()
+	if autoTrans == true {
+		time.Sleep(5 * time.Second)
+	}
 	nd.TransTo(Candidate)
 }
 
@@ -56,13 +69,23 @@ func (nd *Node) onAsCandidate() {
 
 func (nd *Node) onAsLeader() {
 	log.Info("state = Leader")
+	for _, peerNodeURL := range peerNodeURLs {
+		dtx, _ := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		conn, err := grpc.DialContext(dtx, peerNodeURL, grpc.WithInsecure(), grpc.WithBlock())
+		if err != nil {
+			panic(err)
+		}
+		log.Infof("connect to follower %s success", peerNodeURL)
+		nd.HBClients = append(nd.HBClients, demoproto.NewHeartBeatClient(conn))
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
-	nd.startSendHeartBeat(ctx)
+	go nd.startSendHeartBeat(ctx)
 
 	select {
 	case <-time.After(5 * time.Second):
 		cancel()
-		break
+		log.Info("trans from leader to follower triggered")
 	}
 	nd.TransTo(Follower)
 }
@@ -74,6 +97,7 @@ func (nd *Node) startSendHeartBeat(ctx context.Context) {
 		go func(cli demoproto.HeartBeatClient) {
 			dtx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			defer wg.Done()
 			for {
 				rand.Seed(time.Now().UnixNano())
 				electionTimeout := 150 + rand.Int31n(200)
@@ -89,34 +113,6 @@ func (nd *Node) startSendHeartBeat(ctx context.Context) {
 					break
 				}
 			}
-			wg.Done()
-		}(cli)
-	}
-	wg.Wait()
-}
-
-func (nd *Node) StartSendHeartBeat() {
-	var wg sync.WaitGroup
-	for _, cli := range nd.HBClients {
-		wg.Add(1)
-		go func(cli demoproto.HeartBeatClient) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			for {
-				rand.Seed(time.Now().UnixNano())
-				hbInterval := 1500 + rand.Int31n(1000)
-				log.Infof("heartbeat interval = %d", hbInterval)
-				_, err := cli.KeepHeartBeat(ctx, &demoproto.HeartBeatRequest{})
-				if err != nil {
-					panic(err)
-				}
-				log.Infof("heartbeat sent to %v", cli)
-				select {
-				case <-time.After(time.Duration(hbInterval) * time.Millisecond):
-					break
-				}
-			}
-			wg.Done()
 		}(cli)
 	}
 	wg.Wait()

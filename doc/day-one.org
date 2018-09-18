@@ -386,7 +386,163 @@ func (c *Node) transToLeader() {
 #+ATTR_HTML: :width 60% :height 60%
 [[file:img/Screenshot%20from%202018-09-17%2021-48-42.png]]
 
+*** 实现
+**** 心跳发送
+整体没什么大的改动
+#+BEGIN_SRC go
+func (nd *Node) startSendHeartBeat(ctx context.Context) {
+	var wg sync.WaitGroup
+	for _, cli := range nd.HBClients {
+		wg.Add(1)
+		go func(cli demoproto.HeartBeatClient) {
+			dtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			defer wg.Done()
+			for {
+				rand.Seed(time.Now().UnixNano())
+				electionTimeout := 150 + rand.Int31n(200)
+				_, err := cli.KeepHeartBeat(dtx, &demoproto.HeartBeatRequest{})
+				if err != nil {
+					panic(err)
+				}
+				log.Infof("heartbeat sent to %v", cli)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Duration(electionTimeout) * time.Millisecond):
+					break
+				}
+			}
+		}(cli)
+	}
+	wg.Wait()
+}
+#+END_SRC
+1. 变成了私有函数
+2. 增加了一个 /context.Context/ 参数，用于从外部停掉心跳发送
+  1. 目前触发停止心跳是一个 /5/ 的超时，也就是让 /Leader/ 在 /5/ 后转换成 /Follower/
+  2. 收到停止信号后直接返回了
+  3. 停止信号的触发和响应目前已经满足测试需求，以后应该会改
+**** /election timeout/
+实现上并没有什么大的改动
+#+BEGIN_SRC go
+func (hb *HeartBeatServer) StartTimeoutLoop() {
+	for {
+		rand.Seed(time.Now().UnixNano())
+		heartBeatInterval := 150 + rand.Int31n(200)
+		select {
+		case <-hb.hbch:
+			log.Info("timeout reset")
+		case <-time.After(time.Duration(heartBeatInterval) * time.Millisecond):
+			log.Info("timeout triggered")
+			if autoTrans == true {
+				return
+			}
+		}
+	}
+}
+#+END_SRC
+稍微有点变化的是
+1. 超时时间改成了 /150~300ms/ 的随机值
+2. 设置了自动切换的节点，产生 /election timeout/ 后退出循环，其他节点重启循环————这逻辑以后会改掉，现在仅仅给测试用
+**** /Node/
+/Node/ 增加了 /2/ 个属性，并增加了入口函数 /func Startup/ 和状态切换函数 /func TransTo/
+#+BEGIN_SRC go
+type Node struct {
+	Lis        net.Listener
+	grpcServer *grpc.Server
+	HBServer   *HeartBeatServer
+	HBClients  []demoproto.HeartBeatClient
+	State      NodeState
+}
 
+func (nd *Node) Startup() {
+	nd.grpcServer = grpc.NewServer()
+	demoproto.RegisterHeartBeatServer(nd.grpcServer, nd.HBServer)
+	nd.TransTo(Follower)
+}
+
+func (nd *Node) TransTo(state NodeState) {
+	switch state {
+	case Follower:
+		nd.State = Follower
+		nd.onAsFollower()
+	case Candidate:
+		nd.State = Candidate
+		nd.onAsCandidate()
+	case Leader:
+		nd.State = Leader
+		nd.onAsLeader()
+	}
+}
+#+END_SRC
+
+各状态下的具体实现分别由 /3/ 个函数负责
+***** /onAsFollower/
+#+BEGIN_SRC go
+func (nd *Node) onAsFollower() {
+	log.Info("state = Follower")
+	go nd.grpcServer.Serve(nd.Lis)
+	nd.HBServer.StartTimeoutLoop()
+	nd.grpcServer.GracefulStop()
+	if autoTrans == true {
+		time.Sleep(5 * time.Second)
+	}
+	nd.TransTo(Candidate)
+}
+#+END_SRC
+1. 那个非常突兀的 /if/ 是用来测试的，让做自动切换的节点稍微慢下来一点，没什么实际作用
+2. 转换状态前会把接收心跳的 /gRPC Server/ 关闭————这个逻辑以后估计是不对的，但对现在的测试没什么问题
+***** /onAsCandidate/
+目前啥也没干，直接转换到 /Leader/
+***** /onAsLeader/
+#+BEGIN_SRC go
+func (nd *Node) onAsLeader() {
+	log.Info("state = Leader")
+	for _, peerNodeURL := range peerNodeURLs {
+		dtx, _ := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		conn, err := grpc.DialContext(dtx, peerNodeURL, grpc.WithInsecure(), grpc.WithBlock())
+		if err != nil {
+			panic(err)
+		}
+		log.Infof("connect to follower %s success", peerNodeURL)
+		nd.HBClients = append(nd.HBClients, demoproto.NewHeartBeatClient(conn))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go nd.startSendHeartBeat(ctx)
+
+	select {
+	case <-time.After(5 * time.Second):
+		cancel()
+		log.Info("trans from leader to follower triggered")
+	}
+	nd.TransTo(Follower)
+}
+#+END_SRC
+1. 节点成为 /Leader/ 后先连接所有的 /Follower/ ，这逻辑感觉不太对，应该一直保持连接，但是现在先不管了
+2. /5/ 后产生停止心跳的信号
+**** /cmd command/
+这个简单，按需改下
+#+BEGIN_SRC go
+var rootCmd = &cobra.Command{
+	Use:   "embeddemo_pro1",
+	Short: "embeddemo_pro1",
+	Run:   Run,
+}
+
+rootCmd.PersistentFlags().StringVar(&listenURL, "listen", "", "")
+rootCmd.PersistentFlags().StringArrayVar(&peerNodeURLs, "peer-nodes", nil, "")
+rootCmd.PersistentFlags().BoolVar(&autoTrans, "auto-trans", false, "auto trans state for demo")
+
+func Run(cmd *cobra.Command, args []string) {
+	node, err := NewNode()
+	if err != nil {
+		panic(err)
+	}
+	node.Startup()
+}
+#+END_SRC
 
 
 ** ~term~
