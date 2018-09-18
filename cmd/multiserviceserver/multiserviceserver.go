@@ -14,7 +14,7 @@ type HBSV struct {
 
 func (*HBSV) KeepHearBeat(ctx context.Context, req *rpcdemoproto.AppendEntriesRequest) (*rpcdemoproto.AppendEntriesResponse, error) {
 	log.Infof("recv AppendEntriesRequest: %v", req)
-	return &rpcdemoproto.AppendEntriesResponse{}, nil
+	return &rpcdemoproto.AppendEntriesResponse{Term:req.Term}, nil
 }
 
 type VTSV struct {
@@ -22,11 +22,11 @@ type VTSV struct {
 
 func (*VTSV) Vote(ctx context.Context, req *rpcdemoproto.VoteRequest) (*rpcdemoproto.VoteResponse, error) {
 	log.Infof("recv VoteRequest: %v", req)
-	return &rpcdemoproto.VoteResponse{}, nil
+	return &rpcdemoproto.VoteResponse{Term:req.Term}, nil
 }
 
 func main() {
-	lis, err := net.Listen("tcp", "127.0.0.1:22222")
+	lis, err := net.Listen("tcp", "127.0.0.1:10001")
 	if err != nil {
 		panic(err)
 	}

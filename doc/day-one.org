@@ -585,6 +585,26 @@ message VoteResponse {
 从定义可以看到，每个节点同时运行的 /RPC Service/ >= 1 (如 /Leader/ 就要同时作为 /HeartBeatServer/ 和 /AppendEntiresServer/ )；同理节点也有需求同时是不同 /Server/ 的 /Client/ 。如果每一个 /Server/ 都要监听一个端口，就有点不太合适了，所以要想办法一个端口搞定所有的 /Server/。
 
 先实现一个满足要求的 /demo/ 看看。
+***** /multiserviceserver/
+/Server/ 的定义和之前一样，关键是要引入一个新的包 ~github.com/soheilhy/cmux~
+#+BEGIN_SRC go
+func main() {
+	lis, err := net.Listen("tcp", "127.0.0.1:22222")
+	if err != nil {
+		panic(err)
+	}
+
+	m := cmux.New(lis)
+	grpcL := m.Match(cmux.HTTP2HeaderField("content-type", "application/grpc"))
+
+	grpcServer := grpc.NewServer()
+	rpcdemoproto.RegisterHeartBeatServiceServer(grpcServer, &HBSV{})
+	rpcdemoproto.RegisterVoteServiceServer(grpcServer, &VTSV{})
+
+	go grpcServer.Serve(grpcL)
+	m.Serve()
+}
+#+END_SRC
 
 ** ~term~
 这个术语在中文的翻译中被翻译成 ~任期~ ，在论文中是这样描述的
