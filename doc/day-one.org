@@ -534,7 +534,6 @@ func Run(cmd *cobra.Command, args []string) {
 }
 #+END_SRC
 
-
 ** /RPC/
 *** 概念
 理论上来说， /raft/ 只需要 /2/ 种 /RPC/
@@ -605,6 +604,168 @@ func main() {
 	m.Serve()
 }
 #+END_SRC
+
+** /skeleton/
+/demo/ 写到这里，除了选举的细节，程序的主体框架基本已经出来了
+*** /Node/
+**** 定义
+#+BEGIN_SRC go
+type Node struct {
+	listenURL string
+	peerNodes []string
+
+	peerConnections      []*grpc.ClientConn
+	heartBeatClients     []rpcdemoproto.HeartBeatServiceClient
+	voteClients          []rpcdemoproto.VoteServiceClient
+	appendEntriesClients []rpcdemoproto.AppendEntriesServiceClient
+
+	state NodeState
+
+	grpcServer *grpc.Server
+	grpcLis    net.Listener
+	mux        cmux.CMux
+
+	heartBeatC chan struct{}
+}
+
+func (nd *Node) AppendEntries(context.Context, *rpcdemoproto.AppendEntriesRequest) (*rpcdemoproto.AppendEntriesResponse, error) {
+	panic("implement me")
+}
+
+func (nd *Node) Vote(context.Context, *rpcdemoproto.VoteRequest) (*rpcdemoproto.VoteResponse, error) {
+	panic("implement me")
+}
+
+func (nd *Node) KeepHearBeat(ctx context.Context, req *rpcdemoproto.AppendEntriesRequest) (*rpcdemoproto.AppendEntriesResponse, error) {
+	nd.heartBeatC <- struct{}{}
+	//ToDo
+	//process req
+	return &rpcdemoproto.AppendEntriesResponse{Term: req.Term}, nil
+}
+#+END_SRC
+
+最大的变化就是 /Node/ 自身实现了 /3/ 个 /Service interface/ ，之前的 /demo/ 中 /Service/ 是 /Node/ 的一个属性。这样做的好处是处理 /Request/ 和 /Response/ 更加简单直接。
+**** /初始化/
+由于定义的改变，初始化过程也需要调整
+#+BEGIN_SRC go
+func newNode(listenURL string, peerNodes []string) *Node {
+	return &Node{
+		listenURL:  listenURL,
+		peerNodes:  peerNodes,
+		state:      Follower,
+		heartBeatC: make(chan struct{}),
+	}
+}
+
+func (nd *Node) Startup() {
+	lis, err := net.Listen("tcp", nd.listenURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Infof("listen %s success", nd.listenURL)
+
+	nd.mux = cmux.New(lis)
+	nd.grpcLis = nd.mux.Match(cmux.HTTP2HeaderField("content-type", "application/grpc"))
+	nd.grpcServer = grpc.NewServer()
+
+	rpcdemoproto.RegisterHeartBeatServiceServer(nd.grpcServer, nd)
+	rpcdemoproto.RegisterVoteServiceServer(nd.grpcServer, nd)
+	rpcdemoproto.RegisterAppendEntriesServiceServer(nd.grpcServer, nd)
+
+	for _, peerURL := range nd.peerNodes {
+		go func(pu string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			conn, err := grpc.DialContext(ctx, peerURL, grpc.WithInsecure(), grpc.WithBlock())
+			if err != nil {
+				log.Fatalf("connect to peer node %s failed: %s", peerURL, err)
+			}
+			log.Infof("connect to peer node %s success", peerURL)
+			nd.heartBeatClients = append(nd.heartBeatClients, rpcdemoproto.NewHeartBeatServiceClient(conn))
+			nd.voteClients = append(nd.voteClients, rpcdemoproto.NewVoteServiceClient(conn))
+			nd.appendEntriesClients = append(nd.appendEntriesClients, rpcdemoproto.NewAppendEntriesServiceClient(conn))
+		}(peerURL)
+	}
+	nd.transTo(Follower)
+}
+#+END_SRC
+
+现在到其他节点 /Server/ 的 /Client/ 初始化的时候就会建立了。
+
+**** /onAsFollower/
+#+BEGIN_SRC go
+func (nd *Node) onAsFollower() {
+	log.Info("state = Follower")
+
+	go func() {
+		go func() {
+			err := nd.grpcServer.Serve(nd.grpcLis)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}()
+		err := nd.mux.Serve()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}()
+
+	for {
+		rand.Seed(time.Now().UnixNano())
+		electionTimeout := 150 + rand.Int31n(150)
+		log.Infof("set election timeout to: %d", electionTimeout)
+		select {
+		case <-nd.heartBeatC:
+			log.Info("election timeout reset")
+		case <-time.After(time.Duration(electionTimeout) * time.Millisecond):
+			log.Info("election timeout triggered")
+			//ToDo trans to Candidate
+		}
+	}
+
+	nd.transTo(Candidate)
+}
+#+END_SRC
+
+/Server/ 的启动放到了节点内部。
+
+**** /onAsLeader/
+#+BEGIN_SRC go
+func (nd *Node) onAsLeader() {
+	for _, heartBeatClient := range nd.heartBeatClients {
+		go func(cli rpcdemoproto.HeartBeatServiceClient) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			for {
+				response, err := cli.KeepHearBeat(ctx, &rpcdemoproto.AppendEntriesRequest{})
+				if err != nil {
+					//ToDo
+					//shall we auto-reconnect?
+					log.Error(err)
+				}
+				//ToDo
+				log.Info(response)
+			}
+		}(heartBeatClient)
+	}
+	nd.transTo(Follower)
+}
+#+END_SRC
+
+这里变化不大，简单的把代码复制过来。
+
+**** 启动
+#+BEGIN_SRC go
+func Run(*cobra.Command, []string) {
+	node := newNode(lu, pns)
+	node.Startup()
+}
+#+END_SRC
+
+对外提供的接口函数做了简化。
+
+**** 后续
+选举的具体逻辑没有实现，所以 /Node/ 还缺少一些关键的属性，某些代码也不是最终的形式。但整体框架基本就是这样了，后续应该只需要做微调和填入代码就可以了。
 
 ** ~term~
 这个术语在中文的翻译中被翻译成 ~任期~ ，在论文中是这样描述的
