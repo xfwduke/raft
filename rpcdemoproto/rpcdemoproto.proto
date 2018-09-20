@@ -15,6 +15,7 @@ service VoteService {
 message AppendEntriesRequest {
     uint64 term = 1;
     uint64 leaderId = 2;
+    repeated string log = 3;
 }
 message AppendEntriesResponse {
     uint64 term = 1;

@@ -8,6 +8,7 @@ import (
 	"google.golang.org/grpc"
 	"math/rand"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -27,29 +28,50 @@ type Node struct {
 	listenURL string
 	peerNodes []string
 
-	peerConnections      []*grpc.ClientConn
-	heartBeatClients     []rpcdemoproto.HeartBeatServiceClient
+	peerConnections []*grpc.ClientConn
+	//heartBeatClients     []rpcdemoproto.HeartBeatServiceClient
 	voteClients          []rpcdemoproto.VoteServiceClient
 	appendEntriesClients []rpcdemoproto.AppendEntriesServiceClient
 
-	state NodeState
+	state    NodeState
+	stateMux sync.Mutex
+
+	lis net.Listener
 
 	grpcServer *grpc.Server
 	grpcLis    net.Listener
 	mux        cmux.CMux
 
-	heartBeatC chan struct{}
+	//heartBeatRestC    chan struct{}
+	//heartBeatTriggerC chan struct{}
+	//voteResetElectionTimeoutC          chan struct{}
+	//appendEntriesResetElectionTimeoutC chan struct{}
+	cancelElectionTimeout context.CancelFunc
+	cancelElection        context.CancelFunc
 
 	currentTerm uint64
 	votedFor    uint64
 	nodeId      uint64
 }
 
-func (nd *Node) AppendEntries(context.Context, *rpcdemoproto.AppendEntriesRequest) (*rpcdemoproto.AppendEntriesResponse, error) {
-	panic("implement me")
+func (nd *Node) AppendEntries(ctx context.Context, req *rpcdemoproto.AppendEntriesRequest) (*rpcdemoproto.AppendEntriesResponse, error) {
+	nd.cancelElectionTimeout()
+	nd.cancelElection()
+	nd.transTo(Follower)
+
+	if req.Term > nd.currentTerm { // and trans to follower
+		nd.currentTerm = req.Term
+	}
+	if req.Log == nil || len(req.Log) == 0 { //HeartBeat
+
+	} else {
+
+	}
 }
 
 func (nd *Node) Vote(ctx context.Context, req *rpcdemoproto.VoteRequest) (*rpcdemoproto.VoteResponse, error) {
+	nd.cancelElectionTimeout()
+
 	if req.Term < nd.currentTerm {
 		return &rpcdemoproto.VoteResponse{Term: nd.currentTerm, VoteGranted: false}, nil
 	}
@@ -59,94 +81,131 @@ func (nd *Node) Vote(ctx context.Context, req *rpcdemoproto.VoteRequest) (*rpcde
 	return &rpcdemoproto.VoteResponse{Term: req.Term, VoteGranted: false}, nil
 }
 
-func (nd *Node) KeepHearBeat(ctx context.Context, req *rpcdemoproto.AppendEntriesRequest) (*rpcdemoproto.AppendEntriesResponse, error) {
-	nd.heartBeatC <- struct{}{}
-	//ToDo
-	//process req
-	return &rpcdemoproto.AppendEntriesResponse{Term: req.Term}, nil
-}
+//func (nd *Node) KeepHearBeat(ctx context.Context, req *rpcdemoproto.AppendEntriesRequest) (*rpcdemoproto.AppendEntriesResponse, error) {
+//	nd.heartBeatRestC <- struct{}{}
+//	//ToDo
+//	//process req
+//	return &rpcdemoproto.AppendEntriesResponse{Term: req.Term}, nil
+//}
 
 func (nd *Node) Startup() {
+	nd.bindLis()
+	nd.connectPeers()
+	go nd.startPRCService()
+
+	etCtx, etCancel := context.WithCancel(context.Background())
+	nd.cancelElectionTimeout = etCancel
+	go nd.startElectionTimeout(etCtx)
+
+	//for {
+	//	switch nd.state {
+	//	case Follower:
+	//		nd.onAsFollower()
+	//	case Candidate:
+	//		nd.onAsCandidate()
+	//	case Leader:
+	//		nd.onAsLeader()
+	//	}
+	//}
+}
+
+//func (nd *Node) transTo(state NodeState) {
+//	switch state {
+//	case Follower:
+//		nd.state = Follower
+//		nd.onAsFollower()
+//	case Candidate:
+//		nd.state = Candidate
+//		nd.onAsCandidate()
+//	case Leader:
+//		nd.state = Leader
+//		nd.onAsLeader()
+//	}
+//}
+func (nd *Node) bindLis() {
 	lis, err := net.Listen("tcp", nd.listenURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 	log.Infof("listen %s success", nd.listenURL)
+	nd.lis = lis
+}
 
-	nd.mux = cmux.New(lis)
+func (nd *Node) connectPeers() {
+	for _, peer := range nd.peerNodes {
+		go func(peer string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			conn, err := grpc.DialContext(ctx, peer, grpc.WithInsecure(), grpc.WithBlock())
+			if err != nil {
+				log.Fatal("connect to %s failed: %s", peer, err)
+			}
+			log.Infof("connect to peer node %s success", peer)
+			//nd.heartBeatClients = append(nd.heartBeatClients, rpcdemoproto.NewHeartBeatServiceClient(conn))
+			nd.voteClients = append(nd.voteClients, rpcdemoproto.NewVoteServiceClient(conn))
+			nd.appendEntriesClients = append(nd.appendEntriesClients, rpcdemoproto.NewAppendEntriesServiceClient(conn))
+		}(peer)
+	}
+}
+
+func (nd *Node) transTo(s NodeState) {
+	nd.stateMux.Lock()
+	defer nd.stateMux.Unlock()
+	nd.state = s
+}
+func (nd *Node) getState() NodeState {
+	nd.stateMux.Lock()
+	defer nd.stateMux.Unlock()
+	return nd.state
+}
+
+func (nd *Node) startPRCService() {
+	nd.mux = cmux.New(nd.lis)
 	nd.grpcLis = nd.mux.Match(cmux.HTTP2HeaderField("content-type", "application/grpc"))
 	nd.grpcServer = grpc.NewServer()
 
-	rpcdemoproto.RegisterHeartBeatServiceServer(nd.grpcServer, nd)
+	//rpcdemoproto.RegisterHeartBeatServiceServer(nd.grpcServer, nd)
 	rpcdemoproto.RegisterVoteServiceServer(nd.grpcServer, nd)
 	rpcdemoproto.RegisterAppendEntriesServiceServer(nd.grpcServer, nd)
 
-	for _, peerURL := range nd.peerNodes {
-		go func(pu string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			conn, err := grpc.DialContext(ctx, peerURL, grpc.WithInsecure(), grpc.WithBlock())
-			if err != nil {
-				log.Fatalf("connect to peer node %s failed: %s", peerURL, err)
-			}
-			log.Infof("connect to peer node %s success", peerURL)
-			nd.heartBeatClients = append(nd.heartBeatClients, rpcdemoproto.NewHeartBeatServiceClient(conn))
-			nd.voteClients = append(nd.voteClients, rpcdemoproto.NewVoteServiceClient(conn))
-			nd.appendEntriesClients = append(nd.appendEntriesClients, rpcdemoproto.NewAppendEntriesServiceClient(conn))
-		}(peerURL)
+	go func() {
+		err := nd.grpcServer.Serve(nd.grpcLis)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}()
+	err := nd.mux.Serve()
+	if err != nil {
+		log.Fatal(err)
 	}
-	nd.transTo(Follower)
 }
 
-func (nd *Node) transTo(state NodeState) {
-	switch state {
-	case Follower:
-		nd.state = Follower
-		nd.onAsFollower()
-	case Candidate:
-		nd.state = Candidate
-		nd.onAsCandidate()
-	case Leader:
-		nd.state = Leader
-		nd.onAsLeader()
+func (nd *Node) startElectionTimeout(ctx context.Context) {
+	eCtx, eCancel := context.WithCancel(context.Background())
+	nd.cancelElection = eCancel
+
+	for {
+		rand.Seed(time.Now().UnixNano())
+		electionTimeout := 150 + rand.Int31n(150)
+		log.Infof("election timeout set to %d", electionTimeout)
+		select {
+		case <-ctx.Done():
+			log.Infof("election timeout canceled")
+		case <-time.After(time.Duration(electionTimeout) * time.Millisecond):
+			log.Info("election timeout triggered")
+			nd.transTo(Candidate)
+			nd.doElection(eCtx)
+		}
 	}
 }
 
 func (nd *Node) onAsFollower() {
 	log.Info("state = Follower")
 
-	go func() {
-		go func() {
-			err := nd.grpcServer.Serve(nd.grpcLis)
-			if err != nil {
-				log.Fatal(err)
-			}
-		}()
-		err := nd.mux.Serve()
-		if err != nil {
-			log.Fatal(err)
-		}
-	}()
-
-	for {
-		rand.Seed(time.Now().UnixNano())
-		electionTimeout := 150 + rand.Int31n(150)
-		log.Infof("set election timeout to: %d", electionTimeout)
-		select {
-		case <-nd.heartBeatC:
-			log.Info("election timeout reset")
-		case <-time.After(time.Duration(electionTimeout) * time.Millisecond):
-			log.Info("election timeout triggered")
-			//ToDo trans to Candidate
-		}
-	}
-
-	nd.currentTerm += 1
-	nd.transTo(Candidate)
 }
-
-func (nd *Node) onAsCandidate() {
-	nd.votedFor = nd.nodeId
+func (nd *Node) doVote(ctx context.Context) {
+	grantCount := 0
 	for _, cli := range nd.voteClients {
 		go func(cli rpcdemoproto.VoteServiceClient) {
 			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -160,10 +219,87 @@ func (nd *Node) onAsCandidate() {
 			if err != nil {
 				log.Errorf("error when send vote request: %s", err)
 			}
+			if resp.VoteGranted == true {
+				grantCount += 1
+			}
 		}(cli)
-
 	}
-	nd.transTo(Leader)
+	if float64((grantCount+1.0)/(len(nd.peerNodes)+1.0)) > 0.5 {
+		//win
+	} else {
+		//lose
+	}
+}
+
+func (nd *Node) doElection(ctx context.Context) {
+	go func() {
+		defer nd.cancelElection()
+
+		nd.currentTerm += 1
+		nd.votedFor = nd.nodeId
+		nd.cancelElectionTimeout()
+
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Info("election canceled or done")
+	}
+
+	//
+	//grantCount := 0
+	//for _, cli := range nd.voteClients {
+	//	go func(cli rpcdemoproto.VoteServiceClient) {
+	//		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	//
+	//		defer cancel()
+	//		resp, err := cli.Vote(
+	//			ctx,
+	//			&rpcdemoproto.VoteRequest{
+	//				Term:        nd.currentTerm,
+	//				CandidateId: nd.votedFor,
+	//			})
+	//		if err != nil {
+	//			log.Errorf("error when send vote request: %s", err)
+	//		}
+	//		if resp.VoteGranted == true {
+	//			grantCount += 1
+	//		}
+	//	}(cli)
+	//}
+	//if float64((grantCount+1.0)/(len(nd.peerNodes)+1.0)) > 0.5 {
+	//	//win
+	//} else {
+	//	//lose
+	//}
+
+}
+
+func (nd *Node) onAsCandidate() {
+	//go nd.doElection()
+	//select {
+	//case <-nd.heartBeatTriggerC:
+	//	break
+	//}
+	//nd.currentTerm += 1
+	//nd.votedFor = nd.nodeId
+	//nd.heartBeatRestC <- struct{}{}
+	//
+	//for _, cli := range nd.voteClients {
+	//	go func(cli rpcdemoproto.VoteServiceClient) {
+	//		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	//		defer cancel()
+	//		resp, err := cli.Vote(
+	//			ctx,
+	//			&rpcdemoproto.VoteRequest{
+	//				Term:        nd.currentTerm,
+	//				CandidateId: nd.votedFor,
+	//			})
+	//		if err != nil {
+	//			log.Errorf("error when send vote request: %s", err)
+	//		}
+	//	}(cli)
+	//}
 }
 
 func (nd *Node) onAsLeader() {
@@ -183,7 +319,6 @@ func (nd *Node) onAsLeader() {
 			}
 		}(heartBeatClient)
 	}
-	nd.transTo(Follower)
 }
 
 func newNode(listenURL string, peerNodes []string) (*Node, error) {
@@ -195,7 +330,6 @@ func newNode(listenURL string, peerNodes []string) (*Node, error) {
 		listenURL:   listenURL,
 		peerNodes:   peerNodes,
 		state:       Follower,
-		heartBeatC:  make(chan struct{}),
 		currentTerm: 0,
 		nodeId:      hashAddr,
 	}, nil
